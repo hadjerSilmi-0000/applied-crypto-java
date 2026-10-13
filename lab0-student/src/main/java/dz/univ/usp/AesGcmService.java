@@ -1,0 +1,2 @@
+package dz.univ.usp;
+public final class AesGcmService { private AesGcmService(){} public static EncryptedMessage encrypt(byte[] p,byte[] k,byte[] a)throws Exception{throw new UnsupportedOperationException("TODO");} public static byte[] decrypt(EncryptedMessage m,byte[] k)throws Exception{throw new UnsupportedOperationException("TODO");} }
