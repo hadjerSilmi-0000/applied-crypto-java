@@ -1,0 +1,1 @@
+package dz.univ.usp; import org.junit.jupiter.api.Test; import static org.junit.jupiter.api.Assertions.*; class CryptoLabTest { @Test void starterTest(){assertTrue(true); /* Add the required security tests. */} }
