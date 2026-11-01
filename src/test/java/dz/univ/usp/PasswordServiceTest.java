@@ -1,67 +1,96 @@
 package dz.univ.usp;
 
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
-
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.PBEKeySpec;
+import java.security.SecureRandom;
 import java.util.Base64;
-
 import static org.junit.jupiter.api.Assertions.*;
 
 class PasswordServiceTest {
 
     private final PasswordService svc = new Pbkdf2PasswordService();
-    private static final String PW = "Correct-Horse-Battery-9";
 
-    @Test
-    void samePasswordTwiceProducesDifferentHashes() {            // experiments 1 + 2
-        String h1 = svc.hash(PW), h2 = svc.hash(PW);
-        System.out.println("hash1 = " + h1);
-        System.out.println("hash2 = " + h2);
+    /** Builds a valid hash with a weaker (older) iteration count, like one stored years ago. */
+    private static String legacyHash(String password, int iterations) throws Exception {
+        byte[] salt = new byte[16];
+        new SecureRandom().nextBytes(salt);
+        PBEKeySpec spec = new PBEKeySpec(password.toCharArray(), salt, iterations, 256);
+        byte[] h = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+                .generateSecret(spec).getEncoded();
+        Base64.Encoder e = Base64.getEncoder().withoutPadding();
+        return "$pbkdf2-sha256$i=" + iterations + "$" + e.encodeToString(salt) + "$" + e.encodeToString(h);
+    }
+
+    // Experiments 1 and 2: same password hashed twice, the hashes differ
+    @Test void samePasswordGivesDifferentHashes() {
+        String h1 = svc.hash("S3cret!pass");
+        String h2 = svc.hash("S3cret!pass");
         assertNotEquals(h1, h2);
     }
 
-    @Test
-    void correctPasswordVerifies() {                              // experiment 3
-        assertTrue(svc.verify(PW, svc.hash(PW)));
+    @Test void hashHasExpectedFormatAndHidesPassword() {
+        String h = svc.hash("my-password");
+        assertTrue(h.startsWith("$pbkdf2-sha256$i=600000$"));
+        assertEquals(5, h.split("\\$").length);
+        assertFalse(h.contains("my-password"));
     }
 
-    @Test
-    void wrongPasswordRejected() {                                // experiment 4
-        assertFalse(svc.verify("wrong-password", svc.hash(PW)));
+    // Experiment 3: correct password
+    @Test void correctPasswordVerifiesAgainstBothHashes() {
+        String h1 = svc.hash("correct horse");
+        String h2 = svc.hash("correct horse");
+        assertTrue(svc.verify("correct horse", h1));
+        assertTrue(svc.verify("correct horse", h2));
     }
 
-    @ParameterizedTest                                            // experiment 5
-    @ValueSource(strings = {
-            "", "garbage", "$md5$i=1$AAAA$BBBB",
-            "$pbkdf2-sha256$i=abc$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAA",
-            "$pbkdf2-sha256$i=600000$!!!$???",
-            "$pbkdf2-sha256$i=600000$AAAA"
-    })
-    void malformedHashRejectedSafely(String bad) {
-        assertDoesNotThrow(() -> assertFalse(svc.verify(PW, bad)));
+    // Experiment 4: wrong password
+    @Test void wrongPasswordIsRejected() {
+        String h = svc.hash("correct horse");
+        assertFalse(svc.verify("wrong horse", h));
+        assertFalse(svc.verify("correct horse ", h));   // trailing space
+        assertFalse(svc.verify("", h));
+        assertFalse(svc.verify(null, h));
     }
 
-    @Test
-    void nullInputsRejectedSafely() {
-        assertFalse(svc.verify(null, svc.hash(PW)));
-        assertFalse(svc.verify(PW, null));
+    // Experiment 5: malformed hashes are rejected without exceptions
+    @Test void malformedHashesAreRejectedSafely() {
+        String valid = svc.hash("pw");
+        String[] p = valid.split("\\$");   // "", prefix, i=..., salt, hash
+        String[] bad = {
+                null, "", "garbage", "$$$$", "a$b$c$d",
+                "$pbkdf2-sha256$i=abc$" + p[3] + "$" + p[4],          // cost is not a number
+                "$pbkdf2-sha256$i=0$" + p[3] + "$" + p[4],            // cost is zero
+                "$pbkdf2-sha256$i=-5$" + p[3] + "$" + p[4],           // negative cost
+                "$pbkdf2-sha256$i=2000000000$" + p[3] + "$" + p[4],   // absurd cost (DoS)
+                "$pbkdf2-sha256$i=600000$!!!$!!!",                    // invalid Base64
+                "$pbkdf2-sha256$i=600000$AAAA$" + p[4],               // salt too short
+                "$md5$i=600000$" + p[3] + "$" + p[4],                 // wrong algorithm
+                valid.substring(0, valid.length() - 10)               // truncated
+        };
+        for (String b : bad) {
+            assertDoesNotThrow(() -> svc.verify("pw", b));
+            assertFalse(svc.verify("pw", b), "should reject: " + b);
+        }
+    }
+
+    @Test void nullPasswordCannotBeHashed() {
         assertThrows(IllegalArgumentException.class, () -> svc.hash(null));
     }
 
-    @Test
-    void needsRehashBehaviour() {                                 // experiment 6
-        assertFalse(svc.needsRehash(svc.hash(PW)));               // current parameters
-        Base64.Encoder enc = Base64.getEncoder().withoutPadding();
-        String outdated = "$pbkdf2-sha256$i=1000$"
-                + enc.encodeToString(new byte[16]) + "$" + enc.encodeToString(new byte[32]);
-        assertTrue(svc.needsRehash(outdated));                    // weaker iteration count
-        assertTrue(svc.needsRehash("garbage"));                   // malformed
-        assertTrue(svc.needsRehash(null));
+    // Experiment 6: needsRehash
+    @Test void currentHashDoesNotNeedRehash() {
+        assertFalse(svc.needsRehash(svc.hash("pw")));
     }
 
-    @Test
-    void storedHashDoesNotContainPassword() {
-        assertFalse(svc.hash(PW).contains(PW));
+    @Test void outdatedHashNeedsRehashButStillVerifies() throws Exception {
+        String old = legacyHash("pw", 100_000);
+        assertTrue(svc.needsRehash(old));
+        assertTrue(svc.verify("pw", old));   // old hashes keep working with their own cost
+    }
+
+    @Test void malformedHashNeedsRehash() {
+        assertTrue(svc.needsRehash("garbage"));
+        assertTrue(svc.needsRehash(null));
     }
 }
